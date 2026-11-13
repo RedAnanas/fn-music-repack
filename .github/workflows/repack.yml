@@ -1,0 +1,78 @@
+name: 检查更新并发布 APK
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fn-music-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      UPDATE_API_KEY: ${{ secrets.UPDATE_API_KEY }}
+      UPDATE_SIGN_PREFIX: ${{ secrets.UPDATE_SIGN_PREFIX }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: 检查脚本与改包边界
+        run: python3 -m unittest discover -s tests -v
+
+      - name: 查询官方版本和现有发布
+        id: update
+        run: python3 scripts/check_update.py
+
+      - name: 准备 Java
+        if: steps.update.outputs.build == 'true'
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 准备固定版本打包工具和证书
+        if: steps.update.outputs.build == 'true'
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          curl --fail --location --retry 3 https://github.com/iBotPeaches/Apktool/releases/download/v2.11.1/apktool_2.11.1.jar -o work/apktool.jar
+          echo '56d59c524fc764263ba8d345754d8daf55b1887818b15cd3b594f555d249e2db  work/apktool.jar' | sha256sum -c -
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > work/release.jks
+          chmod 600 work/release.jks
+          echo "$ANDROID_HOME/build-tools/35.0.0" >> "$GITHUB_PATH"
+          echo "APKTOOL_JAR=$GITHUB_WORKSPACE/work/apktool.jar" >> "$GITHUB_ENV"
+
+      - name: 下载核验并重新签名
+        if: steps.update.outputs.build == 'true'
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: python3 scripts/repack.py
+
+      - name: 发布到 Releases
+        if: steps.update.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.update.outputs.tag }}
+          VERSION: ${{ steps.update.outputs.version }}
+        run: |
+          if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > work/release.json 2> work/release-error.txt; then
+            if grep -q 'HTTP 404' work/release-error.txt; then
+              gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "飞牛音乐 $VERSION（芒果包名）" --notes-file work/release-notes.md
+            else
+              cat work/release-error.txt >&2
+              exit 1
+            fi
+          fi
+          gh release upload "$TAG" dist/*.apk dist/SHA256SUMS.txt dist/build.json --clobber
+          gh release edit "$TAG" --draft=false --latest --notes-file work/release-notes.md
+
+      - name: 清理临时签名证书
+        if: always()
+        run: rm -f work/release.jks

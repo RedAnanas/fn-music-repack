@@ -1,5 +1,6 @@
 """下载、核验官方 APK，修改清单并使用固定证书签名。"""
 
+import base64
 import hashlib
 import json
 import os
@@ -28,10 +29,26 @@ def run(*command):
 
 
 def verify_certificate(path, expected):
-    output = run("apksigner", "verify", "--print-certs", str(path))
+    output = run("apksigner", "verify", "--verbose", "--print-certs", str(path))
     certificates = re.findall(r"Signer #\d+ certificate SHA-256 digest: ([a-f0-9]+)", output)
     if certificates != [expected]:
         raise ValueError("APK 签名证书与固定指纹不符")
+    return output
+
+
+def verify_source(path, api_md5, http_md5):
+    content = path.read_bytes()
+    md5 = hashlib.md5(content)
+    if api_md5 and md5.hexdigest().lower() != api_md5.lower():
+        raise ValueError("官方下载文件与更新接口的 MD5 不符")
+    if http_md5 is not None and base64.b64encode(md5.digest()).decode("ascii") != http_md5.strip():
+        raise ValueError("官方下载文件与响应头 Content-MD5 不符")
+    report = verify_certificate(path, SOURCE_CERTIFICATE)
+    if not api_md5:
+        if not re.search(r"^Verified using v(?:2|3(?:\.1)?) scheme \([^\n]+\): true$", report, re.MULTILINE):
+            raise ValueError("更新接口未给出 MD5，必须通过官方 APK v2 或 v3 内容签名校验")
+        print("更新接口未给出 MD5，已通过固定官方证书及 APK 内容签名校验")
+    return hashlib.sha256(content).hexdigest()
 
 
 def read_identity(path):
@@ -91,11 +108,10 @@ def main():
     source = work / "official.apk"
     partial = source.with_suffix(".part")
     with urllib.request.urlopen(data["url"], timeout=60) as response, partial.open("wb") as output:
+        http_md5 = response.headers.get("Content-MD5")
         shutil.copyfileobj(response, output)
-    if hashlib.md5(partial.read_bytes()).hexdigest().upper() != data["md5"].upper():
-        raise ValueError("官方下载文件的 MD5 不符")
+    source_sha256 = verify_source(partial, data["md5"], http_md5)
     partial.replace(source)
-    verify_certificate(source, SOURCE_CERTIFICATE)
     identity = read_identity(source)
     if identity != (SOURCE_PACKAGE, data["versionCode"], version):
         raise ValueError("APK 的实际包名或版本与更新接口不符")
@@ -151,7 +167,7 @@ def main():
     Path("dist/SHA256SUMS.txt").write_text(f"{digest}  {final.name}\n", encoding="utf-8")
     metadata = {
         "version": version, "versionCode": data["versionCode"],
-        "package": TARGET_PACKAGE, "sourceMd5": data["md5"],
+        "package": TARGET_PACKAGE, "sourceMd5": data["md5"], "sourceSha256": source_sha256,
         "sha256": digest, "certificateSha256": TARGET_CERTIFICATE,
     }
     Path("dist/build.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")

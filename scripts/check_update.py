@@ -76,15 +76,8 @@ def validate_metadata(data):
     if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version.lstrip("vV")):
         raise ValueError("更新字段 versionName 不是三段版本号")
     md5 = data.get("md5")
-    if not isinstance(md5, str) or not re.fullmatch(r"[a-fA-F0-9]{32}", md5):
-        if not isinstance(md5, str):
-            raise ValueError(f"更新字段 md5 缺失或类型错误：{type(md5).__name__}")
-        groups = [len(group) for group in re.findall(r"[a-fA-F0-9]+", md5)[:6]]
-        raise ValueError(
-            f"更新字段 md5 格式错误（版本 {version}/{code}，长度 {len(md5)}，"
-            f"去除首尾空白后 {len(md5.strip())}，十六进制片段长度 {groups}，"
-            f"含 sha256 字段：{'sha256' in data}）"
-        )
+    if not isinstance(md5, str) or (md5 != "" and not re.fullmatch(r"[a-fA-F0-9]{32}", md5)):
+        raise ValueError("更新字段 md5 必须是 32 位十六进制摘要或空字符串")
 
 
 def get_release(suffix):

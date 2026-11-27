@@ -1,14 +1,16 @@
 """核对改包边界与更新元数据校验。"""
 
+import hashlib
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from check_update import validate_metadata
-from repack import ANDROID, SOURCE_PACKAGE, TARGET_PACKAGE, rewrite_manifest
+from repack import ANDROID, SOURCE_CERTIFICATE, SOURCE_PACKAGE, TARGET_PACKAGE, rewrite_manifest, verify_source
 
 
 class RepackTests(unittest.TestCase):
@@ -44,6 +46,9 @@ class UpdateMetadataTests(unittest.TestCase):
         url = "https://iso.liveupdate.fnnas.com/x86_64/app/FN_Music_1.1.1_00611071528.apk"
         validate_metadata(dict(self.metadata, url=url))
 
+    def test_接受官方明确返回的空摘要(self):
+        validate_metadata(dict(self.metadata, md5=""))
+
     def test_非法字段仍被拒绝并指出字段名(self):
         for field, value in [
             ("url", "http://iso.liveupdate.fnnas.com/file.apk"),
@@ -61,6 +66,40 @@ class UpdateMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"example\.org") as error:
             validate_metadata(dict(self.metadata, url=url))
         self.assertNotIn("private", str(error.exception))
+
+
+class SourceChecksumTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.apk = Path(self.directory.name) / "test.apk"
+        self.apk.write_bytes(b"abc")
+
+    def test_空摘要只接受固定官方证书和已验证的内容签名(self):
+        for signer, scheme, ok in [
+            (SOURCE_CERTIFICATE, "v2", True), (SOURCE_CERTIFICATE, "v3", True),
+            (SOURCE_CERTIFICATE, "v1", False), ("0" * 64, "v2", False),
+        ]:
+            report = (f"Signer #1 certificate SHA-256 digest: {signer}\n"
+                      f"Verified using {scheme} scheme (APK Signature Scheme {scheme}): true\n")
+            with self.subTest(signer=signer, scheme=scheme), patch("repack.run", return_value=report):
+                if ok:
+                    self.assertEqual(verify_source(self.apk, "", None), hashlib.sha256(b"abc").hexdigest())
+                else:
+                    with self.assertRaises(ValueError):
+                        verify_source(self.apk, "", None)
+
+    def test_原有接口摘要和下载响应摘要匹配时仍须验签(self):
+        report = f"Signer #1 certificate SHA-256 digest: {SOURCE_CERTIFICATE}\n"
+        with patch("repack.run", return_value=report) as verifier:
+            self.assertEqual(verify_source(self.apk, "900150983CD24FB0D6963F7D28E17F72",
+                                           "kAFQmDzST7DWlj99KOF/cg=="), hashlib.sha256(b"abc").hexdigest())
+            verifier.assert_called_once_with("apksigner", "verify", "--verbose", "--print-certs", str(self.apk))
+
+    def test_接口或下载响应给错摘要不能退回签名放行(self):
+        for api_md5, http_md5 in [("0" * 32, None), ("", "AAAAAAAAAAAAAAAAAAAAAA==")]:
+            with self.subTest(api_md5=api_md5), self.assertRaisesRegex(ValueError, "MD5"):
+                verify_source(self.apk, api_md5, http_md5)
 
 
 if __name__ == "__main__":

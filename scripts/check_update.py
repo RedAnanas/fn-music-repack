@@ -49,25 +49,35 @@ def query_update():
         return None
     if result.get("code") != 0:
         raise ValueError(f"更新查询失败，错误码 {result.get('code')}")
-    data = result["data"]
+    data = result.get("data")
     validate_metadata(data)
     return data
 
 
 def validate_metadata(data):
-    url = urllib.parse.urlsplit(data["url"])
-    version = data["versionName"].lstrip("vV")
-    if (
-        data["package"] != SOURCE_PACKAGE
-        or url.scheme != "https"
-        or url.netloc != "apppkg.fnnas.com"
-        or not url.path.endswith(".apk")
-        or type(data["versionCode"]) is not int
-        or data["versionCode"] <= 0
-        or not re.fullmatch(r"\d+\.\d+\.\d+", version)
-        or not re.fullmatch(r"[a-fA-F0-9]{32}", data["md5"])
-    ):
-        raise ValueError("官方更新元数据不符合已验证的格式")
+    if not isinstance(data, dict):
+        raise ValueError("更新字段 data 不是对象")
+    if data.get("package") != SOURCE_PACKAGE:
+        raise ValueError("更新字段 package 与飞牛音乐包名不符")
+    if not isinstance(data.get("url"), str):
+        raise ValueError("更新字段 url 不是字符串")
+    try:
+        url = urllib.parse.urlsplit(data["url"])
+    except ValueError:
+        raise ValueError("更新字段 url 格式无效") from None
+    if url.scheme != "https" or not url.path.endswith(".apk"):
+        raise ValueError("更新字段 url 必须是 HTTPS 的 .apk 地址")
+    if url.netloc not in {"apppkg.fnnas.com", "iso.liveupdate.fnnas.com"}:
+        raise ValueError(f"更新字段 url 不在允许的下载来源内，主机名：{url.hostname!a}")
+    code = data.get("versionCode")
+    if type(code) is not int or code <= 0:
+        raise ValueError("更新字段 versionCode 必须是正整数")
+    version = data.get("versionName")
+    if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version.lstrip("vV")):
+        raise ValueError("更新字段 versionName 不是三段版本号")
+    md5 = data.get("md5")
+    if not isinstance(md5, str) or not re.fullmatch(r"[a-fA-F0-9]{32}", md5):
+        raise ValueError("更新字段 md5 不是 32 位十六进制摘要")
 
 
 def get_release(suffix):

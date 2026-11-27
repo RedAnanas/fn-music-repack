@@ -1,6 +1,5 @@
 """核对改包边界与更新元数据校验。"""
 
-import copy
 from pathlib import Path
 import sys
 import tempfile
@@ -32,18 +31,36 @@ class RepackTests(unittest.TestCase):
         self.assertEqual(manifest.find("application/provider").get(ANDROID + "authorities"), TARGET_PACKAGE + ".files")
         self.assertEqual(manifest.find("uses-permission").get(ANDROID + "name"), TARGET_PACKAGE + ".INTERNAL")
 
-    def test_拒绝错误下载域名和非法版本(self):
-        metadata = {
-            "package": SOURCE_PACKAGE, "versionName": "V1.1.0", "versionCode": 110024,
+
+class UpdateMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.metadata = {
+            "package": SOURCE_PACKAGE, "versionName": "V1.1.1", "versionCode": 111006,
             "url": "https://apppkg.fnnas.com/manager/android/example.apk", "md5": "a" * 32,
         }
-        validate_metadata(metadata)
-        for key, value in [("url", "https://example.com/file.apk"), ("versionCode", -1), ("versionName", "1.1.0\ninvalid")]:
-            with self.subTest(field=key):
-                invalid = copy.deepcopy(metadata)
-                invalid[key] = value
-                with self.assertRaises(ValueError):
-                    validate_metadata(invalid)
+
+    def test_接受原更新域名和官网音乐下载地址(self):
+        validate_metadata(self.metadata)
+        url = "https://iso.liveupdate.fnnas.com/x86_64/app/FN_Music_1.1.1_00611071528.apk"
+        validate_metadata(dict(self.metadata, url=url))
+
+    def test_非法字段仍被拒绝并指出字段名(self):
+        for field, value in [
+            ("url", "http://iso.liveupdate.fnnas.com/file.apk"),
+            ("url", "https://iso.liveupdate.fnnas.com/file.zip"),
+            ("url", "https://iso.liveupdate.fnnas.com.example.org/file.apk"),
+            ("url", "https://[invalid"), ("url", None), ("package", "other"),
+            ("versionCode", -1), ("versionCode", True), ("versionName", "1.1.0\ninvalid"),
+            ("versionName", None), ("md5", "invalid"), ("md5", None),
+        ]:
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, field):
+                validate_metadata({**self.metadata, field: value})
+
+    def test_域名错误只报告主机名(self):
+        url = "https://user:private@example.org/private.apk?token=private"
+        with self.assertRaisesRegex(ValueError, r"example\.org") as error:
+            validate_metadata(dict(self.metadata, url=url))
+        self.assertNotIn("private", str(error.exception))
 
 
 if __name__ == "__main__":
